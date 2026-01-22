@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>日语AI互动教练 - 个人版</title>
+    <script src="https://cdn.staticfile.org/kuroshiro/1.2.0/kuroshiro.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/kuroshiro-analyzer-kuromoji@1.1.0/dist/kuroshiro-analyzer-kuromoji.min.js"></script>
+    <style>
+        :root { --primary: #6c5ce7; --accent: #00cec9; --highlight: #fff200; --bg: #f8f9fc; }
+        body { font-family: 'Helvetica Neue', Arial, "Hiragino Sans", sans-serif; background: var(--bg); padding: 15px; display: flex; flex-direction: column; align-items: center; }
+        .card { background: white; border-radius: 24px; padding: 25px; width: 100%; max-width: 550px; box-shadow: 0 10px 40px rgba(0,0,0,0.08); }
+        
+        /* 顶部输入区 */
+        textarea { width: 100%; height: 70px; border-radius: 12px; border: 1.5px solid #eee; padding: 12px; font-size: 1rem; box-sizing: border-box; transition: 0.3s; resize: none; }
+        textarea:focus { border-color: var(--primary); outline: none; }
+
+        /* 状态提示 */
+        #status-bar { margin: 10px 0; font-size: 0.85rem; text-align: center; color: #666; min-height: 20px; }
+        .loader { color: var(--primary); font-weight: bold; }
+
+        /* 内容展示区 */
+        #display-area { font-size: 1.4rem; line-height: 2.6; margin: 15px 0; min-height: 200px; padding: 15px; border-radius: 15px; background: #fff; border: 1px solid #f0f0f0; }
+        .sentence-unit { margin-bottom: 15px; padding: 10px; border-radius: 10px; border-left: 5px solid transparent; transition: 0.3s; }
+        .sentence-unit.active-sent { border-left-color: var(--primary); background: #f1f0ff; }
+        
+        /* 单词样式 */
+        ruby { cursor: pointer; border-radius: 4px; padding: 0 3px; transition: 0.2s; }
+        ruby:hover { background: #eee; }
+        ruby.playing { background: var(--highlight); transform: scale(1.05); display: inline-block; }
+        rt { user-select: none; color: #7f8c8d; }
+
+        /* 按钮设计 */
+        .btn-group { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 20px; }
+        button { padding: 15px; border: none; border-radius: 12px; font-weight: bold; cursor: pointer; transition: 0.2s; font-size: 0.95rem; }
+        .btn-main { background: var(--primary); color: white; width: 100%; margin-top: 10px; }
+        .btn-read { background: var(--accent); color: white; }
+        .btn-record { background: #ff7675; color: white; }
+        button:disabled { background: #ccc; opacity: 0.6; }
+        
+        #score-panel { margin-top: 15px; text-align: center; padding: 10px; border-radius: 10px; background: #e8f4fd; color: #2980b9; display: none; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <textarea id="input-text" placeholder="在此粘贴日语文本（例如 NHK 新闻或歌词）..."></textarea>
+    <button id="init-btn" class="btn-main" onclick="handleProcess()">✨ 开始 AI 解析</button>
+    <div id="status-bar">等待输入...</div>
+
+    <div id="display-area">解析后的内容将支持点击单词发音、全文高亮追踪...</div>
+
+    <div id="score-panel">
+        <div id="score-text">匹配度：0%</div>
+        <div id="heard-text" style="font-size: 0.8rem; opacity: 0.8;"></div>
+    </div>
+
+    <div class="btn-group">
+        <button class="btn-read" id="read-btn" onclick="startFullRead()" disabled>🔊 全文范读</button>
+        <button class="btn-record" id="record-btn" onclick="startPractice()" disabled>🎤 逐句跟读</button>
+    </div>
+</div>
+
+<script>
+    const kuroshiro = new Kuroshiro();
+    let isReady = false;
+    let sentences = [];
+    let currentIdx = 0;
+
+    // 初始化并处理文本
+    async function handleProcess() {
+        const text = document.getElementById('input-text').value.trim();
+        if (!text) return alert("请输入日语文本");
+
+        const status = document.getElementById('status-bar');
+        const initBtn = document.getElementById('init-btn');
+
+        if (!isReady) {
+            status.innerHTML = '<span class="loader">⏳ 正在加载离线词典（约2MB），请稍候...</span>';
+            initBtn.disabled = true;
+
+            try {
+                // 尝试从最快的路径加载词典
+                const analyzer = new KuromojiAnalyzer({ 
+                    dictPath: "https://cdn.jsdelivr.net/gh/takuyaa/kuromoji.js@master/dict" 
+                });
+                await kuroshiro.init(analyzer);
+                isReady = true;
+                status.innerHTML = "✅ 引擎就绪！";
+            } catch (e) {
+                console.error("首选路径失败，尝试备用路径...", e);
+                try {
+                    const altAnalyzer = new KuromojiAnalyzer({ 
+                        dictPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict" 
+                    });
+                    await kuroshiro.init(altAnalyzer);
+                    isReady = true;
+                    status.innerHTML = "✅ 备用引擎就绪！";
+                } catch (e2) {
+                    status.innerHTML = "❌ 加载失败。请尝试刷新页面或在 Live Server 环境打开。";
+                    initBtn.disabled = false;
+                    return;
+                }
+            }
+        }
+
+        initBtn.disabled = false;
+        document.getElementById('read-btn').disabled = false;
+        document.getElementById('record-btn').disabled = false;
+        processData(text);
+    }
+
+    // 解析文本并标注
+    async function processData(text) {
+        const display = document.getElementById('display-area');
+        display.innerHTML = "正在生成互动标注...";
+
+        // 断句
+        const rawSegments = text.split(/([。！？\?\!])+/).filter(s => s.trim().length > 0);
+        sentences = [];
+        for (let i = 0; i < rawSegments.length; i += 2) {
+            const sText = (rawSegments[i] + (rawSegments[i+1] || "")).trim();
+            const html = await kuroshiro.convert(sText, { mode: "furigana", to: "hiragana" });
+            sentences.push({ raw: sText, html: html });
+        }
+
+        renderDisplay();
+    }
+
+    // 渲染显示
+    function renderDisplay() {
+        const display = document.getElementById('display-area');
+        display.innerHTML = "";
+
+        sentences.forEach((data, i) => {
+            const div = document.createElement('div');
+            div.className = 'sentence-unit';
+            div.id = `s-${i}`;
+            div.innerHTML = data.html;
+
+            // 点击单词发音
+            div.querySelectorAll('ruby').forEach(ruby => {
+                ruby.onclick = (e) => {
+                    e.stopPropagation();
+                    const kanji = ruby.childNodes[0].textContent;
+                    ruby.classList.add('playing');
+                    speakAI(kanji, () => ruby.classList.remove('playing'));
+                };
+            });
+            display.appendChild(div);
+        });
+    }
+
+    // 朗读逻辑
+    function speakAI(text, onEnd) {
+        window.speechSynthesis.cancel();
+        const msg = new SpeechSynthesisUtterance(text);
+        msg.lang = 'ja-JP';
+        msg.rate = 0.85;
+        if (onEnd) msg.onend = onEnd;
+        window.speechSynthesis.speak(msg);
+    }
+
+    // 全文朗读（带高亮）
+    function startFullRead() {
+        let i = 0;
+        function next() {
+            if (i >= sentences.length) return;
+            highlight(i);
+            speakAI(sentences[i].raw, () => {
+                i++;
+                next();
+            });
+        }
+        next();
+    }
+
+    // 逐句跟读
+    function startPractice() {
+        const target = sentences[currentIdx].raw;
+        highlight(currentIdx);
+        
+        speakAI(target, () => {
+            const btn = document.getElementById('record-btn');
+            btn.innerText = "🎤 正在倾听...";
+            
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            const rec = new SpeechRecognition();
+            rec.lang = 'ja-JP';
+            rec.start();
+
+            rec.onresult = (e) => {
+                const heard = e.results[0][0].transcript;
+                const score = calcScore(heard, target);
+                
+                const panel = document.getElementById('score-panel');
+                panel.style.display = 'block';
+                document.getElementById('score-text').innerText = `句子 ${currentIdx+1} 匹配度：${score}%`;
+                document.getElementById('heard-text').innerText = `听到：${heard}`;
+
+                if (score > 60) {
+                    currentIdx = (currentIdx + 1) % sentences.length;
+                    setTimeout(startPractice, 2000);
+                }
+            };
+            rec.onend = () => {
+                btn.innerText = "🎤 逐句跟读";
+            };
+        });
+    }
+
+    function highlight(idx) {
+        document.querySelectorAll('.sentence-unit').forEach(el => el.classList.remove('active-sent'));
+        const target = document.getElementById(`s-${idx}`);
+        if (target) {
+            target.classList.add('active-sent');
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }
+
+    function calcScore(s1, s2) {
+        const clean = s => s.replace(/[^\u3040-\u9FAF]/g, "");
+        const t1 = clean(s1), t2 = clean(s2);
+        let m = 0;
+        for (let c of t1) { if (t2.includes(c)) m++; }
+        return Math.min(100, Math.round((m / Math.max(1, t2.length)) * 100));
+    }
+</script>
+
+</body>
+</html>
